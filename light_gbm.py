@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import warnings
@@ -10,7 +11,7 @@ warnings.filterwarnings('ignore')
 # 1. Load and Clean Data
 # ==========================================
 def load_and_clean_data(filepath):
-    print("Loading and cleaning market data...")
+    print(f"Loading and cleaning market data from: {filepath}")
     df = pd.read_csv(filepath, low_memory=False)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
 
@@ -72,14 +73,13 @@ def compute_features(group):
 # ==========================================
 # 3. LightGBM Training
 # ==========================================
-def train_and_predict_lgbm(df, test_years=1):
+def train_and_predict_lgbm(df, test_years=1, n_estimators=300):
     print("\nPreparing LightGBM ML Pipeline...")
 
     features = ['RSI_7D', 'RSI_30D', 'Vol_Ratio', 'MACD_Hist',
                 'ATR_Pct', 'Dist_EMA20', 'Dist_SMA200', 'BB_Width']
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # OPTIMIZATION: Updated dropna to align with new target
     ml_df = df.dropna(subset=features + ['Target_10D']).copy()
 
     max_date    = ml_df['Date'].max()
@@ -92,9 +92,9 @@ def train_and_predict_lgbm(df, test_years=1):
     X_test  = test_data[features]
     y_test  = test_data['Target_10D']
 
-    # OPTIMIZATION: Added subsample_freq to prevent overfitting to noisy data
+    # Dynamically adjusted n_estimators via the pipeline parameter
     lgbm_model = lgb.LGBMClassifier(
-        n_estimators     = 300,
+        n_estimators     = n_estimators,
         learning_rate    = 0.05,
         num_leaves       = 31,
         max_depth        = 6,
@@ -110,7 +110,7 @@ def train_and_predict_lgbm(df, test_years=1):
         verbose          = -1
     )
 
-    print("  Training LightGBM...")
+    print(f"  Training LightGBM with {n_estimators} estimators...")
     lgbm_model.fit(X_train, y_train)
 
     test_data            = test_data.copy()
@@ -118,7 +118,7 @@ def train_and_predict_lgbm(df, test_years=1):
     
     probs = test_data['ML_Prob']
     auc   = roc_auc_score(y_test, probs)
-    print(f"\n  ROC-AUC (out-of-sample) : {auc:.4f}")
+    print(f"  ROC-AUC (out-of-sample) : {auc:.4f}")
 
     return test_data, lgbm_model, auc
 
@@ -132,17 +132,16 @@ def generate_signals(df):
     df['Signal'] = 'HOLD'
     df['Reason'] = ''
 
-    # Percentile gates: top 10% → BUY, top 5% → STRONG BUY
     p90 = df['ML_Prob'].quantile(0.90)
     p95 = df['ML_Prob'].quantile(0.95)
 
     buy_thresh        = max(p90, 0.45)
     strong_buy_thresh = max(p95, 0.50)
 
-    regime_pass    = (df['Vol_MA20'] > 50000) & (df['ATR_Pct'] > 0.015) # Filter out illiquid chops
-    trend_bullish  = (df['CLOSE'] > df['EMA_50']) & (df['EMA_50'] > df['SMA_200']) # Stronger trend check
+    regime_pass    = (df['Vol_MA20'] > 50000) & (df['ATR_Pct'] > 0.015) 
+    trend_bullish  = (df['CLOSE'] > df['EMA_50']) & (df['EMA_50'] > df['SMA_200']) 
     mom_macd_cross = (df['MACD_Hist'] > 0)
-    mom_reject     = (df['RSI_7D'] > 80) # Loosened rejection slightly for momentum runs
+    mom_reject     = (df['RSI_7D'] > 80) 
 
     conf_count = (trend_bullish.astype(int) +
                   mom_macd_cross.astype(int) +
@@ -163,8 +162,8 @@ def generate_signals(df):
 # 5. Portfolio Backtesting (Risk-Based Sizing)
 # ==========================================
 RISK_PER_TRADE_PCT = 0.02
-MAX_POSITION_PCT   = 0.12 # OPTIMIZATION: Reduced from 20% to 12% to mitigate gap-down ruin
-MAX_LOSS_PCT       = 0.08 # OPTIMIZATION: Tightened max structural risk
+MAX_POSITION_PCT   = 0.12 
+MAX_LOSS_PCT       = 0.08 
 
 def backtest_portfolio_system(test_df, initial_capital=100_000.0, max_positions=8):
     print(f"\nRunning Portfolio Simulation...")
@@ -205,9 +204,7 @@ def backtest_portfolio_system(test_df, initial_capital=100_000.0, max_positions=
             if new_stop > pos['stop_loss']:
                 pos['stop_loss'] = new_stop
 
-            # Exit Triggers
             if cur <= pos['stop_loss']:
-                # --- ADJUSTMENT: Strict 10% Loss Ceiling ---
                 if cur < (pos['entry_price'] * 0.90):
                     exec_price = pos['entry_price'] * 0.90 
                     reason = "Stop Hit (Strict 10% Loss Cap)"
@@ -283,8 +280,10 @@ def backtest_portfolio_system(test_df, initial_capital=100_000.0, max_positions=
         port_history.append({'Date': date, 'Total_Equity': cash + sv})
 
     return pd.DataFrame(port_history), pd.DataFrame(trade_log)
+
+
 # ==========================================
-# 6. Performance Report & Main
+# 6. Performance Report
 # ==========================================
 def print_performance_metrics(trade_log, portfolio_df, initial_capital=100_000.0):
     print("\n" + "=" * 55)
@@ -334,27 +333,74 @@ def print_performance_metrics(trade_log, portfolio_df, initial_capital=100_000.0
     print("=" * 55)
 
 
-if __name__ == "__main__":
-    FILE_NAME       = "psx_with_rsi.csv"
-    INITIAL_CAPITAL = 100_000.0
-    MAX_POSITIONS   = 8
-    TEST_YEARS      = 1
+# ==========================================
+# 7. EXPORTABLE ENTRY POINT (MAIN PIPELINE)
+# ==========================================
+def main(input_file: str, output_dir: str, initial_capital: float, max_positions: int, test_years: int, n_estimators: int) -> None:
+    """
+    Exposes the LightGBM execution context to external pipelines.
+    Runs the base model AND generates the position sensitivity analysis CSV.
+    """
+    out_path = Path(output_dir)
 
-    df = load_and_clean_data(FILE_NAME)
+    df = load_and_clean_data(input_file)
     print("Computing technical features per symbol...")
     df = df.groupby('SYMBOL', group_keys=False).apply(compute_features)
 
-    test_df, model, auc = train_and_predict_lgbm(df, test_years=TEST_YEARS)
+    test_df, model, auc = train_and_predict_lgbm(df, test_years=test_years, n_estimators=n_estimators)
     test_df              = generate_signals(test_df)
+    
+    # --- Run Base Portfolio Simulation ---
     portfolio_df, trade_log_df = backtest_portfolio_system(
-        test_df, initial_capital=INITIAL_CAPITAL, max_positions=MAX_POSITIONS
+        test_df, initial_capital=initial_capital, max_positions=max_positions
     )
+    print_performance_metrics(trade_log_df, portfolio_df, initial_capital=initial_capital)
 
-    print_performance_metrics(trade_log_df, portfolio_df, initial_capital=INITIAL_CAPITAL)
-
+    # Save standard outputs
     output_cols = ['Date', 'SYMBOL', 'CLOSE', 'ML_Prob', 'Signal', 'Reason']
-    test_df[output_cols].to_csv("lgbm_signals.csv",   index=False)
-    trade_log_df.to_csv("lgbm_trade_log.csv",         index=False)
-    portfolio_df.to_csv("lgbm_portfolio_history.csv", index=False)
+    test_df[output_cols].to_csv(out_path / "lgbm_signals.csv",   index=False)
+    trade_log_df.to_csv(out_path / "lgbm_trade_log.csv",         index=False)
+    portfolio_df.to_csv(out_path / "lgbm_portfolio_history.csv", index=False)
 
-    print("\nDONE! Outputs saved.")
+    # --- NEW: Position Sensitivity Analysis Loop ---
+    print("\nGenerating Position Size Sensitivity Analysis...")
+    sensitivity_results = []
+    
+    # Test different max position limits (e.g., from 2 positions up to 10 positions)
+    for pos_limit in range(2, 11):
+        print(f"  Testing pipeline with MAX_POSITIONS = {pos_limit}...")
+        p_df, t_log = backtest_portfolio_system(
+            test_df, initial_capital=initial_capital, max_positions=pos_limit
+        )
+        
+        if not p_df.empty and not t_log.empty:
+            final_equity = p_df.iloc[-1]['Total_Equity']
+            net_profit = final_equity - initial_capital
+            roi_pct = (net_profit / initial_capital) * 100
+            total_trades = len(t_log)
+            win_rate = ((t_log['Return_%'] > 0).sum() / total_trades) * 100
+            
+            sensitivity_results.append({
+                'Max_Positions': pos_limit,
+                'Final_Capital': final_equity,
+                'Net_Profit': net_profit,
+                'Portfolio_ROI_Pct': roi_pct,
+                'Total_Trades': total_trades,
+                'Win_Rate_Pct': win_rate
+            })
+            
+    # Save the sensitivity results to CSV
+    sensitivity_df = pd.DataFrame(sensitivity_results)
+    sensitivity_df.to_csv(out_path / "lgbm_position_sensitivity.csv", index=False)
+    print(f"--> Sensitivity analysis saved: {out_path / 'lgbm_position_sensitivity.csv'}")
+
+# Retain standalone manual execution option
+if __name__ == "__main__":
+    main(
+        input_file="psx_with_rsi.csv",
+        output_dir=".",
+        initial_capital=100000.0,
+        max_positions=8,
+        test_years=1,
+        n_estimators=300
+    )
