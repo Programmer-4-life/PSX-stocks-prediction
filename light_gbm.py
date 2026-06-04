@@ -39,6 +39,9 @@ def compute_features(group):
     group['Target_10D'] = (group['CLOSE'].shift(-10) > (group['CLOSE'] * 1.03)).astype(int)
 
     group['Vol_MA20']  = group['VOLUME'].rolling(window=20).mean()
+    #Mathematical Calculation Errors can occur if the 20-day average volume is zero.
+    #Only divide the numbers if the 20-day average is greater than zero. 
+    # If it is zero, don't try to divide it; just assign the ratio a default value of 1.0 (meaning normal volume).
     group['Vol_Ratio'] = np.where(group['Vol_MA20'] > 0,
                                   group['VOLUME'] / group['Vol_MA20'], 1.0)
 
@@ -79,6 +82,9 @@ def train_and_predict_lgbm(df, test_years=1, n_estimators=300):
     features = ['RSI_7D', 'RSI_30D', 'Vol_Ratio', 'MACD_Hist',
                 'ATR_Pct', 'Dist_EMA20', 'Dist_SMA200', 'BB_Width']
 
+    #Just in case any bizarre math calculation sneaks through and creates an "infinity" value, 
+    # this line hunts down all infinities and converts them to NaN (Not a Number), 
+    # which LightGBM is uniquely designed to handle safely without crashing.
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     ml_df = df.dropna(subset=features + ['Target_10D']).copy()
 
@@ -99,12 +105,12 @@ def train_and_predict_lgbm(df, test_years=1, n_estimators=300):
         num_leaves       = 31,
         max_depth        = 6,
         min_child_samples= 20,
-        subsample        = 0.8,
+        subsample        = 0.8, #If subsample = 0.8, it means that when LightGBM is getting ready to build a new decision tree, it randomly throws out 20% of the historical days and trains only on the remaining 80%. When it moves on to build the next tree, it reshuffles the deck and picks a different random 80%.
         subsample_freq   = 1, 
-        colsample_bytree = 0.8,
+        colsample_bytree = 0.8, #If colsample_bytree = 0.8, LightGBM will randomly hide 2 of those indicators from every single tree it builds. One tree might be forced to make predictions without seeing MACD_Hist. The next tree might have to make predictions without seeing RSI_7D.
         class_weight     = 'balanced',
-        reg_alpha        = 0.1,
-        reg_lambda       = 0.1,
+        reg_alpha        = 0.1, #Mathematical Penalties (Regularization): If an indicator (like RSI_30D) isn't consistently helping the model, L1 regularization will aggressively shrink its mathematical importance to exactly $0$. It essentially acts as an automatic cleanup crew, deleting useless noise from the equation.
+        reg_lambda       = 0.1, #L2 Regularization (reg_lambda): If the model becomes overly confident and assigns massive importance to a single indicator, L2 mathematically penalizes it. This forces the model to distribute its decision-making power smoothly across multiple indicators rather than blindly trusting just one.
         random_state     = 42,
         n_jobs           = -1,
         verbose          = -1
